@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 export interface HistoryTurn {
   role: string;
@@ -35,17 +35,31 @@ const SYSTEM_PROMPT = `You are My Girl, a friendly, attentive personal AI assist
 
 function getClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured in environment secrets.');
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+    throw new Error('GEMINI_API_KEY is not configured in Settings > Secrets.');
   }
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
+      timeout: 22000,
       headers: {
         'User-Agent': 'aistudio-build',
       },
     },
   });
+}
+
+function formatGeminiError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  try {
+    const parsed = JSON.parse(raw) as { error?: { message?: string; code?: number } };
+    if (parsed?.error?.message) {
+      return parsed.error.message;
+    }
+  } catch {
+    // ignore non-JSON message
+  }
+  return raw;
 }
 
 export async function generateAgentReply(
@@ -87,64 +101,94 @@ ${memoryContext}
 Active user tasks:
 ${taskContext}`;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-4-hydrogen',
-    contents,
-    config: {
-      systemInstruction,
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          reply: {
-            type: Type.STRING,
-            description: 'Assistant reply in Burmese if user wrote Burmese, otherwise matching user language.',
+  const requestConfig = {
+    systemInstruction,
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        reply: {
+          type: Type.STRING,
+          description: 'Assistant reply in Burmese if user wrote Burmese, otherwise matching user language.',
+        },
+        suggestedMemory: {
+          type: Type.OBJECT,
+          nullable: true,
+          properties: {
+            content: { type: Type.STRING },
+            category: { type: Type.STRING },
           },
-          suggestedMemory: {
-            type: Type.OBJECT,
-            nullable: true,
-            properties: {
-              content: { type: Type.STRING },
-              category: { type: Type.STRING },
-            },
-          },
-          suggestedTask: {
-            type: Type.OBJECT,
-            nullable: true,
-            properties: {
-              title: { type: Type.STRING },
-              runAt: { type: Type.STRING, nullable: true },
-              category: {
-                type: Type.STRING,
-                nullable: true,
-                description: 'One of: personal, work, urgent, general',
-              },
-            },
-          },
-          proposedAction: {
-            type: Type.OBJECT,
-            nullable: true,
-            properties: {
-              action: {
-                type: Type.STRING,
-                description:
-                  'Action identifier such as draft_message, clear_memories, device_navigation, or external_send',
-              },
-              summary: {
-                type: Type.STRING,
-                description: 'Human-readable summary of what will happen if approved',
-              },
-              payload: {
-                type: Type.STRING,
-                description: 'Draft text or parameters for the action',
-              },
+        },
+        suggestedTask: {
+          type: Type.OBJECT,
+          nullable: true,
+          properties: {
+            title: { type: Type.STRING },
+            runAt: { type: Type.STRING, nullable: true },
+            category: {
+              type: Type.STRING,
+              nullable: true,
+              description: 'One of: personal, work, urgent, general',
             },
           },
         },
-        required: ['reply'],
+        proposedAction: {
+          type: Type.OBJECT,
+          nullable: true,
+          properties: {
+            action: {
+              type: Type.STRING,
+              description:
+                'Action identifier such as draft_message, clear_memories, device_navigation, or external_send',
+            },
+            summary: {
+              type: Type.STRING,
+              description: 'Human-readable summary of what will happen if approved',
+            },
+            payload: {
+              type: Type.STRING,
+              description: 'Draft text or parameters for the action',
+            },
+          },
+        },
       },
+      required: ['reply'],
     },
-  });
+  };
+
+  let response;
+  try {
+    response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents,
+      config: {
+        ...requestConfig,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      },
+    });
+  } catch (primaryErr) {
+    const errText = formatGeminiError(primaryErr);
+    const isTransient =
+      errText.includes('503') ||
+      errText.toLowerCase().includes('high demand') ||
+      errText.toLowerCase().includes('unavailable') ||
+      errText.toLowerCase().includes('timeout') ||
+      errText.toLowerCase().includes('aborted');
+
+    if (!isTransient) {
+      throw new Error(errText);
+    }
+
+    try {
+      response = await ai.models.generateContent({
+        model: 'gemini-3.1-flash-lite',
+        contents,
+        config: requestConfig,
+      });
+    } catch (fallbackErr) {
+      throw new Error(formatGeminiError(fallbackErr));
+    }
+  }
 
   const rawText = response.text?.trim() ?? '';
   if (!rawText) {

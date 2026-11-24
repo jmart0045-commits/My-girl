@@ -25,6 +25,22 @@ import type {
 
 const USER_ID = 'default';
 
+function dedupeById<T extends { id: string | number }>(items: T[]): T[] {
+  const seen = new Set<string | number>();
+  const result: T[] = [];
+  for (const item of items) {
+    if (!seen.has(item.id)) {
+      seen.add(item.id);
+      result.push(item);
+    }
+  }
+  return result;
+}
+
+function prependUnique<T extends { id: string | number }>(prev: T[], item: T): T[] {
+  return [item, ...prev.filter((existing) => existing.id !== item.id)];
+}
+
 const NAV_TABS: Array<{ id: ActiveSection; label: string }> = [
   { id: 'workstation', label: 'Workstation' },
   { id: 'chat', label: 'Chat' },
@@ -60,6 +76,7 @@ export default function App() {
   const [showTaskForm, setShowTaskForm] = useState(false);
   const [dueBannerTask, setDueBannerTask] = useState<TaskItem | null>(null);
   const notifiedTaskIdsRef = useRef<Set<number>>(new Set());
+  const tempSeqRef = useRef(0);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', darkMode);
@@ -85,41 +102,47 @@ export default function App() {
           }>;
         };
         setMessages(
-          data.items.map((item) => ({
-            id: String(item.id),
-            role: item.role,
-            content: item.content,
-            created_at: item.created_at,
-          }))
+          dedupeById(
+            data.items.map((item) => ({
+              id: String(item.id),
+              role: item.role,
+              content: item.content,
+              created_at: item.created_at,
+            }))
+          )
         );
       }
       if (memRes.ok) {
         const data = (await memRes.json()) as { items: MemoryItem[] };
-        setMemories(data.items);
+        setMemories(dedupeById(data.items));
       }
       if (taskRes.ok) {
         const data = (await taskRes.json()) as { items: TaskItem[] };
-        setTasks(data.items);
+        setTasks(dedupeById(data.items));
       }
       if (auditRes.ok) {
         const data = (await auditRes.json()) as { items: AuditItem[] };
-        setAudits(data.items);
+        setAudits(dedupeById(data.items));
       }
       if (ttsRes.ok) {
         const data = (await ttsRes.json()) as {
           configured: boolean;
           defaultVoiceId: string;
           voices: ElevenLabsVoice[];
+          warning?: string;
         };
         setElevenLabsConfigured(data.configured);
         if (data.voices?.length > 0) {
-          setElevenLabsVoices(data.voices);
+          setElevenLabsVoices(dedupeById(data.voices));
         }
         if (data.defaultVoiceId) {
           setSelectedVoiceId(data.defaultVoiceId);
         }
         if (!data.configured) {
           setVoiceEngine('browser');
+        }
+        if (data.warning) {
+          setChatError(data.warning);
         }
       }
     } catch {
@@ -181,7 +204,7 @@ export default function App() {
       const text = (overrideText ?? draft).trim();
       if (!text || sending) return;
 
-      const tempUserId = `temp-user-${Date.now()}`;
+      const tempUserId = `temp-user-${Date.now()}-${++tempSeqRef.current}`;
       const optimisticUser: ChatMessage = {
         id: tempUserId,
         role: 'user',
@@ -209,7 +232,8 @@ export default function App() {
             history: historyPayload,
           }),
         });
-        const data = (await res.json()) as {
+        const rawBody = await res.text();
+        let data: {
           error?: string;
           reply?: string;
           userMessage?: { id: number; created_at: string };
@@ -217,7 +241,17 @@ export default function App() {
           savedMemory?: MemoryItem | null;
           suggestedTask?: SuggestedTask | null;
           proposedAction?: ProposedAction | null;
-        };
+        } = {};
+        try {
+          data = rawBody ? (JSON.parse(rawBody) as typeof data) : {};
+        } catch {
+          if (rawBody.trimStart().startsWith('<')) {
+            throw new Error(
+              `Server timed out or returned HTML (HTTP ${res.status}). Please retry in a moment.`
+            );
+          }
+          throw new Error(`Invalid response from server (HTTP ${res.status}).`);
+        }
 
         if (!res.ok) {
           throw new Error(data.error || `Request failed (${res.status})`);
@@ -225,7 +259,9 @@ export default function App() {
 
         const replyText = data.reply ?? 'No response';
         const assistantMsg: ChatMessage = {
-          id: data.assistantMessage ? String(data.assistantMessage.id) : `asst-${Date.now()}`,
+          id: data.assistantMessage
+            ? String(data.assistantMessage.id)
+            : `asst-${Date.now()}-${++tempSeqRef.current}`,
           role: 'assistant',
           content: replyText,
           created_at: data.assistantMessage?.created_at ?? new Date().toISOString(),
@@ -234,17 +270,19 @@ export default function App() {
           proposedAction: data.proposedAction ?? null,
         };
 
-        setMessages((prev) => [
-          ...prev.map((m) =>
-            m.id === tempUserId && data.userMessage
-              ? { ...m, id: String(data.userMessage.id), created_at: data.userMessage.created_at }
-              : m
-          ),
-          assistantMsg,
-        ]);
+        setMessages((prev) =>
+          dedupeById([
+            ...prev.map((m) =>
+              m.id === tempUserId && data.userMessage
+                ? { ...m, id: String(data.userMessage.id), created_at: data.userMessage.created_at }
+                : m
+            ),
+            assistantMsg,
+          ])
+        );
 
         if (data.savedMemory) {
-          setMemories((prev) => [data.savedMemory!, ...prev]);
+          setMemories((prev) => prependUnique(prev, data.savedMemory!));
         }
 
         if (autoSpeak) {
@@ -275,7 +313,7 @@ export default function App() {
     });
     if (res.ok) {
       const data = (await res.json()) as { item: MemoryItem };
-      setMemories((prev) => [data.item, ...prev]);
+      setMemories((prev) => prependUnique(prev, data.item));
     }
   };
 
@@ -305,7 +343,7 @@ export default function App() {
     });
     if (res.ok) {
       const item = (await res.json()) as TaskItem;
-      setTasks((prev) => [item, ...prev]);
+      setTasks((prev) => prependUnique(prev, item));
     }
   };
 
@@ -369,13 +407,13 @@ export default function App() {
     };
 
     if (data.audit) {
-      setAudits((prev) => [data.audit!, ...prev]);
+      setAudits((prev) => prependUnique(prev, data.audit!));
     }
     if (data.task) {
-      setTasks((prev) => [data.task!, ...prev]);
+      setTasks((prev) => prependUnique(prev, data.task!));
     }
     if (data.memory) {
-      setMemories((prev) => [data.memory!, ...prev]);
+      setMemories((prev) => prependUnique(prev, data.memory!));
     }
     if (res.ok && action.toLowerCase() === 'clear_memories') {
       setMemories([]);

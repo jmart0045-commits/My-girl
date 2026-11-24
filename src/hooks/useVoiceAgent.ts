@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { VoiceEngine, VoiceLanguage } from '../types';
 
 interface SpeechRecognitionAlternativeLike {
@@ -350,20 +350,40 @@ export function useVoiceAgent({
     };
   }, [cleanupAudio, ttsSupported]);
 
-  return {
-    speechSupported,
-    ttsSupported,
-    dictating,
-    wakeActive,
-    speaking,
-    synthesizing,
-    voiceNotice,
-    clearVoiceNotice: () => setVoiceNotice(null),
-    startDictation,
-    stopDictation,
-    startWakeListener,
-    stopWakeListener,
-    speak,
-    stopSpeaking,
-  };
+  const clearVoiceNotice = useCallback(() => setVoiceNotice(null), []);
+
+  return useMemo(
+    () => ({
+      speechSupported,
+      ttsSupported,
+      dictating,
+      wakeActive,
+      speaking,
+      synthesizing,
+      voiceNotice,
+      clearVoiceNotice,
+      startDictation,
+      stopDictation,
+      startWakeListener,
+      stopWakeListener,
+      speak,
+      stopSpeaking,
+    }),
+    [
+      speechSupported,
+      ttsSupported,
+      dictating,
+      wakeActive,
+      speaking,
+      synthesizing,
+      voiceNotice,
+      clearVoiceNotice,
+      startDictation,
+      stopDictation,
+      startWakeListener,
+      stopWakeListener,
+      speak,
+      stopSpeaking,
+    ]
+  );
 }

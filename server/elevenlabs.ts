@@ -16,36 +16,58 @@ export const CURATED_VOICES: ElevenLabsVoiceInfo[] = [
   { id: 'cgSgspJ2msm6clMCkdW9', name: 'Jessica (Conversational)', category: 'premade' },
 ];
 
+function getValidApiKey(): { key: string | null; invalidReason?: string } {
+  const raw = process.env.ELEVENLABS_API_KEY?.trim() ?? '';
+  if (!raw || raw === 'MY_ELEVENLABS_API_KEY') {
+    return { key: null };
+  }
+  if (!raw.startsWith('sk_')) {
+    return {
+      key: null,
+      invalidReason:
+        "ELEVENLABS_API_KEY in Settings > Secrets must start with 'sk_'. Using Browser voice until updated.",
+    };
+  }
+  return { key: raw };
+}
+
 export function isElevenLabsConfigured(): boolean {
-  return Boolean(process.env.ELEVENLABS_API_KEY?.trim());
+  return Boolean(getValidApiKey().key);
 }
 
 export async function listElevenLabsVoices(): Promise<{
   configured: boolean;
   defaultVoiceId: string;
   voices: ElevenLabsVoiceInfo[];
+  warning?: string;
 }> {
-  const apiKey = process.env.ELEVENLABS_API_KEY?.trim();
-  if (!apiKey) {
+  const { key, invalidReason } = getValidApiKey();
+  if (!key) {
     return {
       configured: false,
       defaultVoiceId: DEFAULT_ELEVENLABS_VOICE_ID,
       voices: CURATED_VOICES,
+      ...(invalidReason ? { warning: invalidReason } : {}),
     };
   }
 
   try {
     const res = await fetch('https://api.elevenlabs.io/v1/voices', {
       headers: {
-        'xi-api-key': apiKey,
+        'xi-api-key': key,
         Accept: 'application/json',
       },
+      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) {
       return {
-        configured: true,
+        configured: res.status !== 401 && res.status !== 403,
         defaultVoiceId: DEFAULT_ELEVENLABS_VOICE_ID,
         voices: CURATED_VOICES,
+        warning:
+          res.status === 401 || res.status === 403
+            ? 'ElevenLabs rejected ELEVENLABS_API_KEY. Please check Settings > Secrets.'
+            : undefined,
       };
     }
 
@@ -90,11 +112,11 @@ export async function synthesizeElevenLabsSpeech(params: {
   voiceId?: string;
   modelId?: string;
 }): Promise<Buffer> {
-  const apiKey = process.env.ELEVENLABS_API_KEY?.trim();
-  if (!apiKey) {
+  const { key, invalidReason } = getValidApiKey();
+  if (!key) {
     throw new ElevenLabsError(
-      503,
-      'ELEVENLABS_API_KEY is not configured in Settings > Secrets.'
+      invalidReason ? 400 : 503,
+      invalidReason ?? 'ELEVENLABS_API_KEY is not configured in Settings > Secrets.'
     );
   }
 
@@ -113,7 +135,7 @@ export async function synthesizeElevenLabsSpeech(params: {
     {
       method: 'POST',
       headers: {
-        'xi-api-key': apiKey,
+        'xi-api-key': key,
         'Content-Type': 'application/json',
         Accept: 'audio/mpeg',
       },
@@ -125,6 +147,7 @@ export async function synthesizeElevenLabsSpeech(params: {
           similarity_boost: 0.78,
         },
       }),
+      signal: AbortSignal.timeout(20000),
     }
   );
 
