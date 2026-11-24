@@ -1,0 +1,150 @@
+export interface ElevenLabsVoiceInfo {
+  id: string;
+  name: string;
+  category: string;
+}
+
+export const DEFAULT_ELEVENLABS_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
+const VALID_VOICE_ID = /^[a-zA-Z0-9_-]{8,64}$/;
+const ALLOWED_MODELS = new Set(['eleven_multilingual_v2', 'eleven_flash_v2_5']);
+
+export const CURATED_VOICES: ElevenLabsVoiceInfo[] = [
+  { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Sarah (Warm Assistant)', category: 'premade' },
+  { id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel (Calm & Clear)', category: 'premade' },
+  { id: 'XB0fDUnXU5powFXDhCwa', name: 'Charlotte (Natural)', category: 'premade' },
+  { id: 'pFZP5JQG7iQjIQuC4Bku', name: 'Lily (Bright & Expressive)', category: 'premade' },
+  { id: 'cgSgspJ2msm6clMCkdW9', name: 'Jessica (Conversational)', category: 'premade' },
+];
+
+export function isElevenLabsConfigured(): boolean {
+  return Boolean(process.env.ELEVENLABS_API_KEY?.trim());
+}
+
+export async function listElevenLabsVoices(): Promise<{
+  configured: boolean;
+  defaultVoiceId: string;
+  voices: ElevenLabsVoiceInfo[];
+}> {
+  const apiKey = process.env.ELEVENLABS_API_KEY?.trim();
+  if (!apiKey) {
+    return {
+      configured: false,
+      defaultVoiceId: DEFAULT_ELEVENLABS_VOICE_ID,
+      voices: CURATED_VOICES,
+    };
+  }
+
+  try {
+    const res = await fetch('https://api.elevenlabs.io/v1/voices', {
+      headers: {
+        'xi-api-key': apiKey,
+        Accept: 'application/json',
+      },
+    });
+    if (!res.ok) {
+      return {
+        configured: true,
+        defaultVoiceId: DEFAULT_ELEVENLABS_VOICE_ID,
+        voices: CURATED_VOICES,
+      };
+    }
+
+    const data = (await res.json()) as {
+      voices?: Array<{ voice_id?: string; name?: string; category?: string }>;
+    };
+    const mapped = (data.voices ?? [])
+      .filter((v): v is { voice_id: string; name: string; category?: string } =>
+        Boolean(v?.voice_id && v?.name)
+      )
+      .slice(0, 40)
+      .map((v) => ({
+        id: v.voice_id,
+        name: v.name,
+        category: v.category ?? 'premade',
+      }));
+
+    return {
+      configured: true,
+      defaultVoiceId: mapped[0]?.id ?? DEFAULT_ELEVENLABS_VOICE_ID,
+      voices: mapped.length > 0 ? mapped : CURATED_VOICES,
+    };
+  } catch {
+    return {
+      configured: true,
+      defaultVoiceId: DEFAULT_ELEVENLABS_VOICE_ID,
+      voices: CURATED_VOICES,
+    };
+  }
+}
+
+export class ElevenLabsError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export async function synthesizeElevenLabsSpeech(params: {
+  text: string;
+  voiceId?: string;
+  modelId?: string;
+}): Promise<Buffer> {
+  const apiKey = process.env.ELEVENLABS_API_KEY?.trim();
+  if (!apiKey) {
+    throw new ElevenLabsError(
+      503,
+      'ELEVENLABS_API_KEY is not configured in Settings > Secrets.'
+    );
+  }
+
+  const voiceId = (params.voiceId ?? DEFAULT_ELEVENLABS_VOICE_ID).trim();
+  if (!VALID_VOICE_ID.test(voiceId)) {
+    throw new ElevenLabsError(400, 'Invalid ElevenLabs voice ID.');
+  }
+
+  const modelId =
+    params.modelId && ALLOWED_MODELS.has(params.modelId)
+      ? params.modelId
+      : 'eleven_multilingual_v2';
+
+  const res = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`,
+    {
+      method: 'POST',
+      headers: {
+        'xi-api-key': apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'audio/mpeg',
+      },
+      body: JSON.stringify({
+        text: params.text,
+        model_id: modelId,
+        voice_settings: {
+          stability: 0.45,
+          similarity_boost: 0.78,
+        },
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    let detail = `ElevenLabs API error (${res.status})`;
+    try {
+      const errJson = (await res.json()) as {
+        detail?: { message?: string } | string;
+      };
+      if (typeof errJson.detail === 'string') {
+        detail = errJson.detail;
+      } else if (errJson.detail?.message) {
+        detail = errJson.detail.message;
+      }
+    } catch {
+      // ignore non-JSON error body
+    }
+    throw new ElevenLabsError(res.status >= 400 && res.status < 600 ? res.status : 502, detail);
+  }
+
+  const arrayBuffer = await res.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}

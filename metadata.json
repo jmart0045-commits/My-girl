@@ -1,0 +1,6 @@
+{
+  "name": "My Girl V2",
+  "description": "Bilingual Burmese and English personal AI agent with voice wake detection, persistent memory vault, task scheduler, and explicit action approval gate.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
